@@ -18,10 +18,10 @@ set -x
 echo "Mine:"
 # Run mpirun with debugging options to display mapping and binding
 mpirun --report-bindings --display-map --display-allocation --map-by node --bind-to core \
-./trains testcases/correctness/sample2.in
+./trains testcases/correctness/correctness.in
 
-echo "Seq:"
+# echo "Seq:"
 mpirun --report-bindings --display-map --display-allocation --map-by node --bind-to core \
-./bench_seq testcases/correctness/sample2.in
+./bench_seq testcases/correctness/correctness.in
 
 echo "Done"

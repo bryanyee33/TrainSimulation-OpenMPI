@@ -260,7 +260,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
     vector<int> output_sendbuff(total_num_trains << 1);
     vector<int> output_recvbuff;
     if (mpi_rank == 0) {
-        output_recvbuff.resize(total_num_trains << 1);
+        output_recvbuff.resize(total_num_trains << 1, -1);
     }
 
     for (int tick = 0; tick < int_ticks; ++tick) {
@@ -386,7 +386,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
 
                 // No need to clear output_recvbuff since all trains in the next tick will be in the same position.
                 // All -1 will remain until that train spawns.
-                for (size_t train = 0; train < train_color.size(); ++train) {
+                for (int train = 0; train < total_num_trains; ++train) {
                     idx = train << 1;
                     if (output_recvbuff[idx] == -1) { // From station empty. Train not yet spawned.
                         continue;
