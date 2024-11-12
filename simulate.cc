@@ -45,6 +45,26 @@ inline int pair_idx(vector<int> &keys, vector<int> &vals, int key, int val) {
     return -1;
 }
 
+// Find lexicographical ordering of numbers. Curr must start at 1, with vec including 0 at the start.
+inline void lexico(int curr, int lim, vector<int> &vec) {
+    if (lim <= curr) { // Exclude lim
+        return;
+    }
+    vec.emplace_back(curr);
+    lexico(curr * 10, lim, vec);
+
+    if (curr % 10 != 9) {
+        lexico(curr + 1, lim, vec);
+    }
+}
+
+// Takes the original vector's index -> value, and reverses it into value -> index in reverse vector
+inline void reverse_map(vector<int> &original, vector<int> &reverse) {
+    for (size_t i = 0; i < original.size(); ++i) {
+        reverse[original[i]] = i;
+    }
+}
+
 // Assign platforms in color order, to maximise self-communication rather than communicating with other processes.
 // Each process calculates this to prevent communication of this giant list.
 inline void assign_platforms(int platforms_per_process, int platform_idx, vector<int> &platform_from, vector<int> &platform_to,
@@ -168,6 +188,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
               const unordered_map<char, size_t> num_trains, size_t num_ticks_to_print, size_t mpi_rank,
               size_t total_processes) {
 
+    int num_colors = station_lines.size();
     int num_platforms = 0;
     for (size_t i = 0; i < num_stations; ++i) {
         for (size_t j = 0; j < num_stations; ++j) {
@@ -180,26 +201,25 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
     // Number of trains in terms of color indices
     vector<int> num_trains_vec;
     int total_num_trains = 0;
-    for (size_t color = 0; color < num_trains.size(); ++color) {
+    for (int color = 0; color < num_colors; ++color) {
         num_trains_vec.emplace_back(num_trains.at(colors[color]));
         total_num_trains += num_trains.at(colors[color]);
     }
 
     // Station lines in terms of color and station_name indices
-    vector<vector<int>> station_lines_vec(station_lines.size());
-    for (size_t color = 0; color < station_lines.size(); ++color) {
+    vector<vector<int>> station_lines_vec(num_colors);
+    for (int color = 0; color < num_colors; ++color) {
         for (const string &station_name: station_lines.at(colors[color])) {
             station_lines_vec[color].emplace_back(std::find(station_names.begin(), station_names.end(), station_name) - station_names.begin());
         }
     }
 
-    int num_colors = station_lines.size();
     int platforms_per_process = (num_platforms + total_processes - 1) / total_processes; // Round up
     int platform_startidx = platforms_per_process * mpi_rank;
 
     vector<int> platform_from, platform_to, platform_dist; // Only this process' platforms
     vector<vector<int>> platform_colors(platforms_per_process); // Colors for this process' platforms
-    vector<vector<int>> platform_spawns(platforms_per_process, vector<int>(num_colors, 0)); // Number needed to spawn for this process' platforms
+    vector<vector<int>> platform_spawns(platforms_per_process, vector<int>(num_colors, 0)); // Amount needed to spawn for this process' platforms
     vector<vector<bool>> platform_spawns_is_last(platforms_per_process, vector<bool>(num_colors, false)); // Whether this spawn is the last terminal or first
     vector<int> all_platform_from, all_platform_to; // Sorted based on color, all process' platforms
     all_platform_from.reserve(num_platforms);
@@ -216,6 +236,63 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
 
     find_connected_platforms(platform_from, platform_to, outgoing, incoming, platforms_per_process, platform_colors, all_platform_from, all_platform_to, station_lines_vec);
 
+    // Output ordering
+    bool spawns_left = true;
+    vector<int> output_order; // Each value is a train id, sorted based on color first, then by lexicographical order of the train id
+    vector<int> reverse_output_order; // Each index is a train id, and the value is its index in the output_order vector
+    
+    if (mpi_rank == 0) { // Only rank 0 printing
+        vector<int> sorted_colors(num_colors); // colors (represented by indices) sorted lexicographically
+        vector<int> start_free_by_color(num_colors); // Starting index for each color group
+        vector<int> next_free_by_color(num_colors); // Next index for a train of this color to be placed at
+        std::iota(sorted_colors.begin(), sorted_colors.end(), 0); // Range from 0 to num_colors - 1
+        std::sort(sorted_colors.begin(), sorted_colors.end(), [&](int i, int j) {return colors[i] < colors[j];}); // Sort lexicographically
+
+        int cum_sum = 0;
+        for (int color : sorted_colors) {
+            // Starting index of this color depends on previous colors
+            start_free_by_color[color] = cum_sum;
+            next_free_by_color[color] = cum_sum;
+            cum_sum += num_trains.at(colors[color]);
+        }
+
+        reverse_output_order.resize(total_num_trains);
+        output_order.reserve(total_num_trains);
+        output_order.emplace_back(0);
+
+        // The vectors here are reused so the vector names do not correspond to the actual items. The comments show what is stored.
+        lexico(1, total_num_trains, output_order); // The first total_num_trains numbers sorted lexicographically (starting from 0)
+        reverse_map(output_order, reverse_output_order); // The reverse mapping of the above (used as precomputation for speed)
+
+        int train_id = 0, num_spawned;
+
+        // Spawn all trains from all processes and store the ordering
+        while (spawns_left) {
+            spawns_left = false;
+            for (int color = 0; color < num_colors; ++color) {
+                num_spawned = std::min(2, num_trains_vec[color]);
+                for (int spawn = 0; spawn < num_spawned; ++spawn) {
+                    output_order[next_free_by_color[color]++] = train_id++;
+                    spawns_left = true;
+                }
+                num_trains_vec[color] -= num_spawned;
+            }
+        }
+
+        // Reset num_trains_vec for use within main loop
+        for (int color = 0; color < num_colors; ++color) {
+            num_trains_vec[color] = num_trains.at(colors[color]);
+        }
+
+        // Sort each group of colors in lexicographical order. next_free_by_color now has the ending index.
+        auto lexi_comp = [&](int i, int j) {return reverse_output_order[i] < reverse_output_order[j];};
+        for (int i = 0; i < num_colors; ++i) {
+            std::sort(output_order.begin() + start_free_by_color[i], output_order.begin() + next_free_by_color[i], lexi_comp);
+        }
+        reverse_map(output_order, reverse_output_order); // Store the actual reverse mapping now that output_order has been calculated
+    }
+
+
     vector<PlatformLoadTimeGen> pltg;
     for (int platform = 0; platform < num_platforms_rank; ++platform) {
         pltg.emplace_back(popularities[platform_from[platform]]);
@@ -223,7 +300,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
 
     int NEG_ONE = -1, out_color, idx;
     int int_ticks = (int)ticks, int_num_ticks_to_print = (int)num_ticks_to_print;
-    bool spawns_left = true;
+    spawns_left = true;
 
     // Status of trains
     vector<int> travelling(num_platforms_rank);
@@ -238,21 +315,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
     vector<int> recvbuff(num_colors * num_platforms_rank, -1); // Each platform can receive trains up to the number of colors available
     vector<MPI_Request> recvstats(num_colors * num_platforms_rank, MPI_REQUEST_NULL);
     MPI_Request unneeded_req; // For unneeded output.
-
-    // Output ordering
-    vector<LineColor> sorted_colors = std::vector<LineColor>(colors.begin(), colors.begin() + num_trains.size());
-    std::sort(sorted_colors.begin(), sorted_colors.end());
-    int cum_sum = 0;
-    unordered_map<LineColor, int> next_free_by_color; // Next index for a train of this color to be placed at
-    for (size_t color = 0; color < sorted_colors.size(); ++color) {
-        // Starting index of this color depends on previous colors
-        next_free_by_color[sorted_colors[color]] = cum_sum;
-        cum_sum += num_trains.at(sorted_colors[color]);
-    }
-
-    vector<int> output_order(total_num_trains, -1); // Each index corresponds with the train idx, and the element is the position when sorted.
-    vector<int> reverse_output_order(total_num_trains, -1); // Each index corresponds with the sorted position, and the element is the train idx.
-
+    
     // Each train status will be represented by 3 ints:
     // Tag: Train idx (so only 2 ints sent in buffer)
     // int_1: From station
@@ -332,8 +395,6 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                 }
                 int num_spawned = std::min(2, num_trains_vec[color]);
                 for (int i = 0; i < num_spawned; ++i) {
-                    output_order[train_color.size()] = next_free_by_color[colors[color]]; // Store train output ordering
-                    reverse_output_order[next_free_by_color[colors[color]]++] = train_color.size(); // Reverse of train output ordering
                     train_color.emplace_back(color); // Store color information for all process' trains
                     spawns_left = true;
                 }
@@ -351,19 +412,19 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
         }
 
         if (tick >= int_ticks - int_num_ticks_to_print) {
+            idx = 0; // Reset
             MPI_Barrier(MPI_COMM_WORLD); // Needed since rank 0 could still be receiving MPI msgs
 
             // Send train details for output
             for (int platform = 0; platform < num_platforms_rank; ++platform) {
                 if (travel_time_left[platform] > 0) {
-                    idx = output_order[travelling[platform]] << 1;
                     output_sendbuff[idx] = platform_from[platform];
                     output_sendbuff[idx + 1] = platform_to[platform];
                     MPI_Isend(&output_sendbuff[idx], 2, MPI_INT, 0, travelling[platform], MPI_COMM_WORLD, &unneeded_req);
+                    idx += 2;
                 }
                 
                 for (size_t i = 0; i < trains[platform].size(); ++i) {
-                    idx = output_order[trains[platform][i]] << 1;
                     output_sendbuff[idx] = platform_from[platform];
                     if (i == 0) {
                         output_sendbuff[idx + 1] = -1; // Platform
@@ -371,6 +432,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                         output_sendbuff[idx + 1] = -2; // Holding area
                     }
                     MPI_Isend(&output_sendbuff[idx], 2, MPI_INT, 0, trains[platform][i], MPI_COMM_WORLD, &unneeded_req);
+                    idx += 2;
                 }
             }
 
@@ -379,7 +441,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                 // train_color has the exact number of trains we have in this tick
                 for (size_t train = 0; train < train_color.size(); ++train) {
                     // Place them in specified order so don't need to sort again
-                    MPI_Recv(&output_recvbuff[output_order[train] << 1], 2, MPI_INT, MPI_ANY_SOURCE, train, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    MPI_Recv(&output_recvbuff[reverse_output_order[train] << 1], 2, MPI_INT, MPI_ANY_SOURCE, train, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                 }
 
                 printf("%d:", tick);
@@ -393,13 +455,13 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                     }
 
                     if (output_recvbuff[idx + 1] == -1) { // Platform
-                        printf(" %c%d-%s%%", colors[train_color[reverse_output_order[train]]], reverse_output_order[train],
+                        printf(" %c%d-%s%%", colors[train_color[output_order[train]]], output_order[train],
                             station_names[output_recvbuff[idx]].c_str());
                     } else if (output_recvbuff[idx + 1] == -2) { // Holding area
-                        printf(" %c%d-%s#", colors[train_color[reverse_output_order[train]]], reverse_output_order[train],
+                        printf(" %c%d-%s#", colors[train_color[output_order[train]]], output_order[train],
                             station_names[output_recvbuff[idx]].c_str());
                     } else { // Travelling
-                        printf(" %c%d-%s->%s", colors[train_color[reverse_output_order[train]]], reverse_output_order[train],
+                        printf(" %c%d-%s->%s", colors[train_color[output_order[train]]], output_order[train],
                             station_names[output_recvbuff[idx]].c_str(), station_names[output_recvbuff[idx + 1]].c_str());
                     }
                 }
@@ -408,53 +470,4 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
         }
         MPI_Barrier(MPI_COMM_WORLD); // Needed since rank 0 could still be receiving MPI msgs
     }
-
-    // if (mpi_rank == -1) {
-    //     printf("oo:\n");
-    //     for (int i : output_order) {
-    //         printf("%d,",i);
-    //     }
-    //     printf("\n");
-        
-    //     printf("%d, %d\nps:\n", platforms_per_process, platform_startidx);
-
-    //     for (size_t i = 0; i < platform_from.size(); ++i) {
-    //         printf("from: %d, to: %d\n",platform_from[i], platform_to[i]);
-    //     }
-    //     printf("\npo:\n");
-    //     for (size_t i = 0; i < all_platform_from.size(); ++i) {
-    //         printf("from: %d, to: %d\n",all_platform_from[i], all_platform_to[i]);
-    //     }
-    //     printf("\npc:\n");
-    //     for (auto i : platform_colors) {
-    //         printf("nxt color:\n");
-    //         for (auto j : i) {
-    //             printf("%d,",j);
-    //         }
-    //         printf("\n");
-    //     }
-    //     printf("\npspawns:\n");
-    //     for (auto i : platform_spawns) {
-    //         printf("nxt spawn:\n");
-    //         for (auto j : i) {
-    //             printf("%d,",j);
-    //         }
-    //         printf("\n");
-    //     }
-    //     printf("\noutgoing:\n");
-    //     for (auto i : outgoing) {
-    //         printf("nxt outgoing:\n");
-    //         for (auto j : i) {
-    //             printf("key: %d, platform: %d, rank: %d\n", j.first, j.second.platform, j.second.rank);
-    //         }
-    //     }
-    //     printf("\nincoming:\n");
-    //     for (auto i : incoming) {
-    //         printf("nxt incoming:\n");
-    //         for (auto j : i) {
-    //             printf("key: %d, platform: %d, rank: %d\n", j.first, j.second.platform, j.second.rank);
-    //         }
-    //     }
-    //     printf("\n");
-    // }
 }
