@@ -4,8 +4,9 @@
 
 #SBATCH --job-name=a3-mpi
 #SBATCH --nodes=1
-#SBATCH --ntasks=2
-#SBATCH --partition=xs-4114
+#SBATCH --ntasks=8
+##SBATCH --partition=xs-4114
+#SBATCH --partition=i7-13700
 #SBATCH --time=00:03:00
 #SBATCH --output=a3_%j.slurmlog
 #SBATCH --error=a3_%j.slurmlog
@@ -18,6 +19,6 @@ set -x
 echo "Mine:"
 # Run mpirun with debugging options to display mapping and binding
 mpirun --report-bindings --display-map --display-allocation --map-by node --bind-to core \
-./trains testcases/performance/min_test.in
+./trains testcases/performance/hard.in
 
 echo "Done"

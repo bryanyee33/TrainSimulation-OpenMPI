@@ -5,7 +5,8 @@
 #SBATCH --job-name=a3-mpi
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --partition=xs-4114
+##SBATCH --partition=xs-4114
+#SBATCH --partition=i7-13700
 #SBATCH --time=00:03:00
 #SBATCH --output=a3_%j.slurmlog
 #SBATCH --error=a3_%j.slurmlog
@@ -17,6 +18,6 @@ set -x
 
 echo "Seq:"
 mpirun --report-bindings --display-map --display-allocation --map-by node --bind-to core \
-./bench_seq testcases/performance/min_test.in
+./bench_seq testcases/performance/hard.in
 
 echo "Done"

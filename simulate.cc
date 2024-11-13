@@ -45,16 +45,24 @@ inline int pair_idx(vector<int> &keys, vector<int> &vals, int key, int val) {
     return -1;
 }
 
-// Find lexicographical ordering of numbers. Curr must start at 1, with vec including 0 at the start.
-inline void lexico(int curr, int lim, vector<int> &vec) {
-    if (lim <= curr) { // Exclude lim
-        return;
-    }
-    vec.emplace_back(curr);
-    lexico(curr * 10, lim, vec);
+// // Find lexicographical ordering of numbers, starting from 0. n must be at least 1.
+inline void lexico(unsigned int n, vector<int> &result) {
+    unsigned int curr = 1;
+    result.emplace_back(0);
 
-    if (curr % 10 != 9) {
-        lexico(curr + 1, lim, vec);
+    for (unsigned int i = 1; i < n; ++i) { // Get n numbers (excluding first 0)
+        result.emplace_back(curr);
+
+        if (curr * 10 < n) { // Endings with 0 are ordered first
+            curr *= 10;
+        } else{
+            if (++curr >= n) { // Exceeded limit
+                curr = (curr + 9) / 10; // (curr + 10) / 10 == (curr / 10) + 1
+            }
+            while (curr % 10 == 0) { // Remove trailing 0s for the correct ordering
+                curr /= 10;
+            }
+        }
     }
 }
 
@@ -241,7 +249,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
     vector<int> output_order; // Each value is a train id, sorted based on color first, then by lexicographical order of the train id
     vector<int> reverse_output_order; // Each index is a train id, and the value is its index in the output_order vector
     
-    if (mpi_rank == 0) { // Only rank 0 printing
+    if (mpi_rank == 0) { // Only rank 0 is printing
         vector<int> sorted_colors(num_colors); // colors (represented by indices) sorted lexicographically
         vector<int> start_free_by_color(num_colors); // Starting index for each color group
         vector<int> next_free_by_color(num_colors); // Next index for a train of this color to be placed at
@@ -256,12 +264,11 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
             cum_sum += num_trains.at(colors[color]);
         }
 
-        reverse_output_order.resize(total_num_trains);
+        reverse_output_order.assign(total_num_trains, 0);
         output_order.reserve(total_num_trains);
-        output_order.emplace_back(0);
 
         // The vectors here are reused so the vector names do not correspond to the actual items. The comments show what is stored.
-        lexico(1, total_num_trains, output_order); // The first total_num_trains numbers sorted lexicographically (starting from 0)
+        lexico(total_num_trains, output_order); // The first total_num_trains numbers sorted lexicographically (starting from 0)
         reverse_map(output_order, reverse_output_order); // The reverse mapping of the above (used as precomputation for speed)
 
         int train_id = 0, num_spawned;
@@ -323,7 +330,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
     vector<int> output_sendbuff(total_num_trains << 1);
     vector<int> output_recvbuff;
     if (mpi_rank == 0) {
-        output_recvbuff.resize(total_num_trains << 1, -1);
+        output_recvbuff.assign(total_num_trains << 1, -1);
     }
 
     for (int tick = 0; tick < int_ticks; ++tick) {
@@ -370,9 +377,8 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
 
         // Update trains received from connected platforms
         for (int platform = 0; platform < num_platforms_rank; ++platform) {
-            for (int color : platform_colors[platform]) {
-                MPI_Wait(&recvstats[platform * num_colors + color], MPI_STATUS_IGNORE); // Wait till all trains received
-            }
+            MPI_Waitall(num_colors, &recvstats[platform * num_colors], MPI_STATUSES_IGNORE);
+
             // Sort received trains by id
             std::sort(recvbuff.begin() + (platform * num_colors), recvbuff.begin() + ((platform + 1) * num_colors));
 
@@ -390,6 +396,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
             for (int color = 0; color < num_colors; ++color) {
                 for (int platform = 0; platform < num_platforms_rank; ++platform) {
                     if (platform_spawns[platform][color]-- > 0) { // Spawn for current platform
+                        // train_color has all trains spawned till now (its size is next train idx)
                         trains[platform].emplace_back(train_color.size() + platform_spawns_is_last[platform][color]);
                     }
                 }
@@ -421,7 +428,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                     output_sendbuff[idx] = platform_from[platform];
                     output_sendbuff[idx + 1] = platform_to[platform];
                     MPI_Isend(&output_sendbuff[idx], 2, MPI_INT, 0, travelling[platform], MPI_COMM_WORLD, &unneeded_req);
-                    idx += 2;
+                    idx += 2; // Random order on sender's side in output_sendbuff
                 }
                 
                 for (size_t i = 0; i < trains[platform].size(); ++i) {
@@ -432,7 +439,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                         output_sendbuff[idx + 1] = -2; // Holding area
                     }
                     MPI_Isend(&output_sendbuff[idx], 2, MPI_INT, 0, trains[platform][i], MPI_COMM_WORLD, &unneeded_req);
-                    idx += 2;
+                    idx += 2; // Random order on sender's side in output_sendbuff
                 }
             }
 
@@ -440,7 +447,7 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
             if (mpi_rank == 0) {
                 // train_color has the exact number of trains we have in this tick
                 for (size_t train = 0; train < train_color.size(); ++train) {
-                    // Place them in specified order so don't need to sort again
+                    // Place them in specified order so don't need to sort
                     MPI_Recv(&output_recvbuff[reverse_output_order[train] << 1], 2, MPI_INT, MPI_ANY_SOURCE, train, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
                 }
 

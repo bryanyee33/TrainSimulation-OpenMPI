@@ -1,6 +1,6 @@
-CXX=g++
+CXX=clang++
 CXXFLAGS:=-Wall -Wextra -pedantic -std=c++20
-RELEASEFLAGS:=-O3
+RELEASEFLAGS:=-Ofast
 
 OUTPUT := trains
 
