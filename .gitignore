@@ -33,3 +33,5 @@
 trains
 
 *.slurmlog
+output.txt
+seqoutput.txt

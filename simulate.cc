@@ -475,6 +475,6 @@ void simulate(size_t num_stations, const vector<string> &station_names, const st
                 printf("\n");
             }
         }
-        MPI_Barrier(MPI_COMM_WORLD); // Needed since rank 0 could still be receiving MPI msgs
+        MPI_Barrier(MPI_COMM_WORLD); // Synchronise all ranks
     }
 }

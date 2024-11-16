@@ -16,7 +16,6 @@ echo "Received mpirun arguments: $@"
 # Display commands being run in stdout
 set -x
 
-echo "Mine:"
 # Run mpirun with debugging options to display mapping and binding
 mpirun --report-bindings --display-map --display-allocation --map-by node --bind-to core \
 ./trains testcases/performance/hard.in
