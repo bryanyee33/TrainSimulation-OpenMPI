@@ -18,6 +18,6 @@ set -x
 
 echo "Seq:"
 mpirun --report-bindings --display-map --display-allocation --map-by node --bind-to core \
-./bench_seq testcases/performance/hard.in
+./bench_seq testcases/bonus/simple.in
 
 echo "Done"
